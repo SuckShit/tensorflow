@@ -27,7 +27,7 @@ limitations under the License.
 #include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/lib/bfloat16/bfloat16.h"
+#include "tensorflow/core/platform/bfloat16.h"
 #include "tensorflow/core/platform/logging.h"
 
 namespace xla {
@@ -396,25 +396,30 @@ PyTypeObject PyBfloat16_Type = {
 PyArray_ArrFuncs NPyBfloat16_ArrFuncs;
 
 PyArray_Descr NPyBfloat16_Descr = {
-    PyObject_HEAD_INIT(nullptr) & PyBfloat16_Type,  // typeobj
+    PyObject_HEAD_INIT(nullptr)  //
+                                 /*typeobj=*/
+    (&PyBfloat16_Type),
     // We must register bfloat16 with a kind other than "f", because numpy
     // considers two types with the same kind and size to be equal, but
     // float16 != bfloat16.
     // The downside of this is that NumPy scalar promotion does not work with
     // bfloat16 values.
-    'V',  // kind
+    /*kind=*/'V',
     // TODO(phawkins): there doesn't seem to be a way of guaranteeing a type
     // character is unique.
-    'E',                                                  // type
-    '=',                                                  // byteorder
-    NPY_NEEDS_PYAPI | NPY_USE_GETITEM | NPY_USE_SETITEM,  // hasobject
-    0,                                                    // type_num
-    sizeof(bfloat16),                                     // elsize
-    alignof(bfloat16),                                    // alignment
-    nullptr,                                              // subarray
-    nullptr,                                              // fields
-    nullptr,                                              // names
-    &NPyBfloat16_ArrFuncs,                                // f
+    /*type=*/'E',
+    /*byteorder=*/'=',
+    /*flags=*/NPY_NEEDS_PYAPI | NPY_USE_GETITEM | NPY_USE_SETITEM,
+    /*type_num=*/0,
+    /*elsize=*/sizeof(bfloat16),
+    /*alignment=*/alignof(bfloat16),
+    /*subarray=*/nullptr,
+    /*fields=*/nullptr,
+    /*names=*/nullptr,
+    /*f=*/&NPyBfloat16_ArrFuncs,
+    /*metadata=*/nullptr,
+    /*c_metadata=*/nullptr,
+    /*hash=*/-1,  // -1 means "not computed yet".
 };
 
 // Implementations of NumPy array methods.
@@ -455,10 +460,10 @@ int NPyBfloat16_Compare(const void* a, const void* b, void* arr) {
     return 1;
   }
   // NaNs sort to the end.
-  if (!std::isnan(x) && std::isnan(y)) {
+  if (!Eigen::numext::isnan(x) && Eigen::numext::isnan(y)) {
     return -1;
   }
-  if (std::isnan(x) && !std::isnan(y)) {
+  if (Eigen::numext::isnan(x) && !Eigen::numext::isnan(y)) {
     return 1;
   }
   return 0;
@@ -962,7 +967,7 @@ struct Frexp {
 struct Heaviside {
   bfloat16 operator()(bfloat16 bx, bfloat16 h0) {
     float x = static_cast<float>(bx);
-    if (std::isnan(x)) {
+    if (Eigen::numext::isnan(x)) {
       return bx;
     }
     if (x < 0) {
@@ -984,7 +989,9 @@ struct IsInf {
   bool operator()(bfloat16 a) { return std::isinf(static_cast<float>(a)); }
 };
 struct IsNan {
-  bool operator()(bfloat16 a) { return std::isnan(static_cast<float>(a)); }
+  bool operator()(bfloat16 a) {
+    return Eigen::numext::isnan(static_cast<float>(a));
+  }
 };
 struct Ldexp {
   bfloat16 operator()(bfloat16 a, int exp) {
@@ -1200,25 +1207,25 @@ struct Ge {
 struct Maximum {
   bfloat16 operator()(bfloat16 a, bfloat16 b) {
     float fa(a), fb(b);
-    return std::isnan(fa) || fa > fb ? a : b;
+    return Eigen::numext::isnan(fa) || fa > fb ? a : b;
   }
 };
 struct Minimum {
   bfloat16 operator()(bfloat16 a, bfloat16 b) {
     float fa(a), fb(b);
-    return std::isnan(fa) || fa < fb ? a : b;
+    return Eigen::numext::isnan(fa) || fa < fb ? a : b;
   }
 };
 struct Fmax {
   bfloat16 operator()(bfloat16 a, bfloat16 b) {
     float fa(a), fb(b);
-    return std::isnan(fb) || fa > fb ? a : b;
+    return Eigen::numext::isnan(fb) || fa > fb ? a : b;
   }
 };
 struct Fmin {
   bfloat16 operator()(bfloat16 a, bfloat16 b) {
     float fa(a), fb(b);
-    return std::isnan(fb) || fa < fb ? a : b;
+    return Eigen::numext::isnan(fb) || fa < fb ? a : b;
   }
 };
 
@@ -1244,7 +1251,8 @@ struct NextAfter {
     float from_as_float(from), to_as_float(to);
     memcpy(&from_as_int, &from, sizeof(bfloat16));
     memcpy(&to_as_int, &to, sizeof(bfloat16));
-    if (std::isnan(from_as_float) || std::isnan(to_as_float)) {
+    if (Eigen::numext::isnan(from_as_float) ||
+        Eigen::numext::isnan(to_as_float)) {
       return bfloat16(std::numeric_limits<float>::quiet_NaN());
     }
     if (from_as_int == to_as_int) {

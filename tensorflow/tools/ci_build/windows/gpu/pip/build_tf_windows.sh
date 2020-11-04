@@ -106,7 +106,7 @@ if [[ "$RELEASE_BUILD" == 1 ]]; then
   # Because this hurts the performance of TF, we don't override it in release build.
   export TF_OVERRIDE_EIGEN_STRONG_INLINE=0
 else
-  export TF_OVERRIDE_EIGEN_STRONG_INLINE=1
+  export TF_OVERRIDE_EIGEN_STRONG_INLINE=0
 fi
 
 if [[ "$TF_NIGHTLY" == 1 ]]; then
@@ -138,9 +138,8 @@ fi
 
 run_configure_for_gpu_build
 
-bazel build --announce_rc --config=opt --define=no_tensorflow_py_deps=true \
+bazel build --config=release_gpu_windows ${EXTRA_BUILD_FLAGS} \
   --output_filter=^$ \
-  ${EXTRA_BUILD_FLAGS} \
   tensorflow/tools/pip_package:build_pip_package || exit $?
 
 if [[ "$SKIP_TEST" == 1 ]]; then

@@ -59,8 +59,14 @@ struct TFInlinerInterface : public DialectInlinerInterface {
   // Analysis Hooks
   //===--------------------------------------------------------------------===//
 
+  // Allow all call operations to be inlined.
+  bool isLegalToInline(Operation* call, Operation* callable,
+                       bool wouldBeCloned) const final {
+    return true;
+  }
   // Defines the legality of inlining TF Device operations.
-  bool isLegalToInline(Operation*, Region*, BlockAndValueMapping&) const final {
+  bool isLegalToInline(Operation*, Region*, bool,
+                       BlockAndValueMapping&) const final {
     // For now, enable inlining all operations.
     return true;
   }
@@ -101,7 +107,8 @@ bool BlockWrapsSingleOp(Block* block) {
 }  // end anonymous namespace
 
 TensorFlowDeviceDialect::TensorFlowDeviceDialect(MLIRContext* context)
-    : Dialect(/*name=*/"tf_device", context) {
+    : Dialect(/*name=*/"tf_device", context,
+              TypeID::get<TensorFlowDeviceDialect>()) {
   addOperations<
 #define GET_OP_LIST
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.cc.inc"
@@ -117,31 +124,6 @@ TensorFlowDeviceDialect::TensorFlowDeviceDialect(MLIRContext* context)
 // Checks if a tf_device.launch wraps a single operation and the single
 // operation results are perfectly forwarded to the launch return.
 bool LaunchOp::WrapsSingleOp() { return BlockWrapsSingleOp(&GetBody()); }
-
-//===----------------------------------------------------------------------===//
-// tf_device.return
-//===----------------------------------------------------------------------===//
-
-namespace {
-ParseResult ParseReturnOp(OpAsmParser* parser, OperationState* state) {
-  llvm::SmallVector<OpAsmParser::OperandType, 2> op_info;
-  llvm::SmallVector<Type, 2> types;
-  llvm::SMLoc loc = parser->getCurrentLocation();
-  return failure(parser->parseOperandList(op_info) ||
-                 (!op_info.empty() && parser->parseColonTypeList(types)) ||
-                 parser->resolveOperands(op_info, types, loc, state->operands));
-}
-
-void Print(ReturnOp op, OpAsmPrinter* p) {
-  *p << op.getOperationName();
-  if (op.getNumOperands() > 0) {
-    *p << ' ';
-    p->printOperands(op.getOperands());
-    *p << " : ";
-    interleaveComma(op.getOperandTypes(), *p);
-  }
-}
-}  // anonymous namespace
 
 //===----------------------------------------------------------------------===//
 // tf_device.parallel_execute
@@ -293,8 +275,6 @@ ParseResult SetReplicateOpOperands(
         replicated_inputs,
     llvm::ArrayRef<OpAsmParser::OperandType> packed_inputs,
     llvm::ArrayRef<Type> region_arg_types, int32_t* n) {
-  if (replicated_inputs.empty() && packed_inputs.empty()) return success();
-
   for (const auto& attr : state->attributes)
     if (attr.first.strref() == "n")
       if (auto n_attr = attr.second.dyn_cast<IntegerAttr>())
@@ -302,6 +282,8 @@ ParseResult SetReplicateOpOperands(
 
   if (*n < 2)
     return parser->emitError(loc) << "expects 'n' to be at least 2, got " << *n;
+
+  if (replicated_inputs.empty() && packed_inputs.empty()) return success();
 
   for (auto replicated_input_and_idx : llvm::enumerate(replicated_inputs)) {
     const int32_t idx = replicated_input_and_idx.index();
@@ -393,7 +375,7 @@ void Print(ReplicateOp op, OpAsmPrinter* p) {
   //     [%a, ...] as %block_arg0: type
   //   packed_input
   //     %b as %block_arg1: type
-  const int32_t n = op.n().getSExtValue();
+  const int32_t n = op.n();
   const int32_t num_replicated_inputs =
       (*op.operand_segment_sizes().int_value_begin()).getSExtValue();
   const int32_t num_replicated_block_args = num_replicated_inputs / n;
@@ -437,7 +419,7 @@ LogicalResult VerifyCompatibleTypes(Type a, Type b) {
 }
 
 LogicalResult Verify(ReplicateOp op) {
-  int32_t n = op.n().getSExtValue();
+  int32_t n = op.n();
 
   // Check number of devices, if set, matches `n`.
   if (op.devices().hasValue()) {
@@ -528,13 +510,12 @@ LogicalResult Verify(ReplicateOp op) {
   return success();
 }
 
-template <typename OperandsTy, typename ResultsTy>
 void BuildReplicateOp(
     Builder* builder, OperationState* state, int n,
     const llvm::SmallDenseMap<StringRef, llvm::SmallVector<StringRef, 4>>&
         devices,
-    llvm::ArrayRef<std::pair<OperandsTy, Type>> replicated_inputs,
-    llvm::ArrayRef<Value> packed_inputs, ResultsTy replica_output_types) {
+    llvm::ArrayRef<std::pair<ValueRange, Type>> replicated_inputs,
+    ValueRange packed_inputs, TypeRange replica_output_types) {
   DCHECK_GE(n, 2);
   state->addAttribute("n", builder->getI32IntegerAttr(n));
 
@@ -562,15 +543,17 @@ void BuildReplicateOp(
     block.addArgument(replicated_input.second);
   }
 
-  for (auto& packed_input : packed_inputs) {
+  for (auto packed_input : packed_inputs) {
     state->addOperands(packed_input);
     block.addArgument(packed_input.getType());
   }
 
   // Add derived `operand_segment_sizes` attribute.
   int32_t num_replicated_inputs = replicated_inputs.size() * n;
-  auto operand_segment_sizes = DenseIntElementsAttr::get(
-      VectorType::get({2}, builder->getI32Type()), {num_replicated_inputs, 0});
+  int32_t num_packed_inputs = packed_inputs.size();
+  auto operand_segment_sizes =
+      DenseIntElementsAttr::get(VectorType::get({2}, builder->getI32Type()),
+                                {num_replicated_inputs, num_packed_inputs});
   state->addAttribute(kOperandSegmentSizesAttr, operand_segment_sizes);
 
   for (const auto& output_type : replica_output_types)
@@ -582,22 +565,69 @@ void ReplicateOp::build(
     OpBuilder& builder, OperationState& state, int n,
     const llvm::SmallDenseMap<StringRef, llvm::SmallVector<StringRef, 4>>&
         devices,
-    llvm::ArrayRef<std::pair<llvm::ArrayRef<Value>, Type>> replicated_inputs,
-    llvm::ArrayRef<Value> packed_inputs,
-    llvm::ArrayRef<Type> replica_output_types) {
+    llvm::ArrayRef<std::pair<ValueRange, Type>> replicated_inputs,
+    ValueRange packed_inputs, TypeRange replica_output_types) {
   BuildReplicateOp(&builder, &state, n, devices, replicated_inputs,
                    packed_inputs, replica_output_types);
 }
 
-void ReplicateOp::build(
-    OpBuilder& builder, OperationState& state, int n,
-    const llvm::SmallDenseMap<StringRef, llvm::SmallVector<StringRef, 4>>&
-        devices,
-    llvm::ArrayRef<std::pair<Operation::operand_range, Type>> replicated_inputs,
-    llvm::ArrayRef<Value> packed_inputs,
-    Operation::result_type_range replica_output_types) {
-  BuildReplicateOp(&builder, &state, n, devices, replicated_inputs,
-                   packed_inputs, replica_output_types);
+// Returns the number of packed block arguments.
+unsigned ReplicateOp::GetNumPackedBlockArguments() {
+  return packed_inputs().size();
+}
+
+// Returns the number of replicated block arguments.
+unsigned ReplicateOp::GetNumReplicatedBlockArguments() {
+  return GetBody().getNumArguments() - GetNumPackedBlockArguments();
+}
+
+// Returns the replicated block arguments. A copy should be made if the
+// replicate op is being modified.
+llvm::ArrayRef<BlockArgument> ReplicateOp::GetReplicatedBlockArguments() {
+  return GetBody().getArguments().drop_back(GetNumPackedBlockArguments());
+}
+
+// Returns the packed block arguments. A copy should be made if the replicate op
+// is being modified.
+llvm::ArrayRef<BlockArgument> ReplicateOp::GetPackedBlockArguments() {
+  return GetBody().getArguments().take_back(GetNumPackedBlockArguments());
+}
+
+// Checks if a block argument is replicated (forwarding replicated inputs).
+bool ReplicateOp::IsReplicatedBlockArgument(BlockArgument block_arg) {
+  assert(block_arg.getOwner() == &GetBody());
+  return block_arg.getArgNumber() < GetNumReplicatedBlockArguments();
+}
+
+// Checks if a block argument is packed (forwarding a packed input).
+bool ReplicateOp::IsPackedBlockArgument(BlockArgument block_arg) {
+  return !IsReplicatedBlockArgument(block_arg);
+}
+
+// Returns the operand index of the operand being forwarded as a
+// replicated/packed block argument for a given replica. This assumes a valid
+// block argument (of the replicate op) and a valid replica is provided.
+unsigned ReplicateOp::GetReplicaOperandIndexForBlockArgument(
+    BlockArgument block_arg, unsigned replica) {
+  const int32_t num_replicas = nAttr().getInt();
+  assert(replica < num_replicas && block_arg.getOwner() == &GetBody());
+
+  const unsigned num_replicated_args = GetNumReplicatedBlockArguments();
+  if (block_arg.getArgNumber() < num_replicated_args)
+    return block_arg.getArgNumber() * num_replicas + replica;
+
+  return block_arg.getArgNumber() - num_replicated_args +
+         replicated_inputs().size();
+}
+
+// Returns the operand being forwarded as a replicated/packed block argument for
+// a given replica. This assumes a valid block argument (of the replicate op)
+// and a valid replica is provided.
+Value ReplicateOp::GetReplicaOperandForBlockArgument(BlockArgument block_arg,
+                                                     unsigned replica) {
+  const unsigned operand_index =
+      GetReplicaOperandIndexForBlockArgument(block_arg, replica);
+  return getOperand(operand_index);
 }
 
 //===----------------------------------------------------------------------===//
@@ -633,12 +663,12 @@ void LaunchOp::getCanonicalizationPatterns(OwningRewritePatternList& results,
   results.insert<DropEmptyLaunch>(context);
 }
 
+}  // namespace tf_device
+}  // namespace mlir
+
 //===----------------------------------------------------------------------===//
 // TableGen'd op method definitions
 //===----------------------------------------------------------------------===//
 
 #define GET_OP_CLASSES
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_device.cc.inc"
-
-}  // namespace tf_device
-}  // namespace mlir

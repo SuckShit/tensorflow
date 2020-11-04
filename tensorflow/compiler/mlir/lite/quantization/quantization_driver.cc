@@ -99,12 +99,14 @@ class QuantizationDriver {
  public:
   explicit QuantizationDriver(FuncOp fn, bool is_signed,
                               bool disable_per_channel,
-                              OpQuantSpecGetter op_quant_spec_getter)
+                              OpQuantSpecGetter op_quant_spec_getter,
+                              bool enforce_fixed_output_range)
       : fn_(fn),
         builder_(fn.getBody()),
         is_signed_(is_signed),
         disable_per_channel_(disable_per_channel),
-        op_quant_spec_getter_(op_quant_spec_getter) {}
+        op_quant_spec_getter_(op_quant_spec_getter),
+        enforce_fixed_output_range_(enforce_fixed_output_range) {}
 
   // The entry point of the quantization parameters propagation.
   void Run();
@@ -286,32 +288,59 @@ class QuantizationDriver {
 
   void DumpStates(Operation *current_op) {
     if (current_op) {
-      llvm::errs() << "\n\n\n" << current_op->getName() << "\n";
+      llvm::dbgs() << "\n\n\n" << current_op->getName() << "\n";
     }
     fn_.walk([&](Operation *op) {
-      if (llvm::isa<quant::QuantizeCastOp, quant::DequantizeCastOp, ConstantOp>(
+      if (op->isKnownTerminator() ||
+          op->hasTrait<OpTrait::quant::NoQuantizableResult>() ||
+          llvm::isa<quant::QuantizeCastOp, quant::DequantizeCastOp, ConstantOp>(
               op))
         return;
-      if (current_op == op) llvm::errs() << "===>>>";
-      llvm::errs() << op->getName() << " : (";
+      if (current_op == op) llvm::dbgs() << "===>>>";
+      llvm::dbgs() << op->getName() << " : (";
+      if (llvm::isa<FuncOp>(op)) {
+        for (auto &arg : fn_.getArguments()) {
+          if (auto params = GetArgQuantState(arg).params) {
+            params.print(llvm::dbgs());
+            auto requantize_state = GetArgRequantizeState(arg);
+            if (requantize_state.pos != RequantizeState::NO_REQUANTIZE) {
+              llvm::dbgs() << "+";
+              requantize_state.params.print(llvm::dbgs());
+            }
+          }
+          llvm::dbgs() << ",";
+        }
+      }
       for (int i = 0, e = op->getNumOperands(); i < e; ++i) {
-        if (auto params = GetOperandQuantState(op, i).params)
-          params.print(llvm::errs());
-        else
+        if (auto params = GetOperandQuantState(op, i).params) {
+          params.print(llvm::dbgs());
+          auto requantize_state = GetOperandRequantizeState(op, i);
+          if (requantize_state.pos != RequantizeState::NO_REQUANTIZE) {
+            llvm::dbgs() << "+";
+            requantize_state.params.print(llvm::dbgs());
+          }
+        } else {
           op->getOperand(i).getType().cast<ShapedType>().getElementType().print(
-              llvm::errs());
-        llvm::errs() << ",";
+              llvm::dbgs());
+        }
+        llvm::dbgs() << ",";
       }
-      llvm::errs() << ") -> (";
+      llvm::dbgs() << ") -> (";
       for (int i = 0, e = op->getNumResults(); i < e; ++i) {
-        if (auto params = GetResultQuantState(op, i).params)
-          params.print(llvm::errs());
-        else
+        if (auto params = GetResultQuantState(op, i).params) {
+          params.print(llvm::dbgs());
+          auto requantize_state = GetResultRequantizeState(op, i);
+          if (requantize_state.pos != RequantizeState::NO_REQUANTIZE) {
+            llvm::dbgs() << "+";
+            requantize_state.params.print(llvm::dbgs());
+          }
+        } else {
           op->getResult(i).getType().cast<ShapedType>().getElementType().print(
-              llvm::errs());
-        llvm::errs() << ",";
+              llvm::dbgs());
+        }
+        llvm::dbgs() << ",";
       }
-      llvm::errs() << ")\n";
+      llvm::dbgs() << ")\n";
     });
   }
 
@@ -354,6 +383,8 @@ class QuantizationDriver {
   llvm::SmallVector<BlockArgument, 4> args_;
 
   OpQuantSpecGetter op_quant_spec_getter_;
+
+  bool enforce_fixed_output_range_;
 };
 }  // namespace
 
@@ -694,8 +725,7 @@ void QuantizationDriver::SetupAllStates() {
   fn_.walk([&](Operation *op) {
     if (op->isKnownTerminator() ||
         op->hasTrait<OpTrait::quant::NoQuantizableResult>() ||
-        llvm::isa<quant::DequantizeCastOp>(op) ||
-        llvm::isa<quant::QuantizeCastOp>(op))
+        llvm::isa<quant::DequantizeCastOp, quant::QuantizeCastOp>(op))
       return;
     work_list_.push_back(op);
 
@@ -795,16 +825,19 @@ bool QuantizationDriver::PropagateParams() {
     }
 
     // TODO(fengliuai): make the bit width configurable.
-    auto spec = GetQuantSpec(op);
-    auto key = std::make_pair(8, is_signed_);
-    auto &restricted_outputs = spec->restricted_output_params[key];
-    for (int i = 0, e = restricted_outputs.size(); i != e; ++i) {
-      // The restrict can be nullptr if the result has been quantized.
-      if (auto params = restricted_outputs[i]) {
-        changed |= SetResultParams(op, i, params);
+    auto restricted = llvm::dyn_cast<FixedOutputRangeInterface>(op);
+    if (restricted && enforce_fixed_output_range_) {
+      // TODO(fengliuai): different result can have different fixed range.
+      auto params = restricted.GetFixedOutputRange(is_signed_, /*bit_width=*/8);
+      for (auto i = 0; i < op->getNumResults(); ++i) {
+        // The range is null if the result has been quantized.
+        if (params) {
+          changed |= SetResultParams(op, i, params);
+        }
       }
     }
 
+    auto spec = GetQuantSpec(op);
     for (auto &it : spec->biases_params) {
       auto params =
           GetBiasParams(op, it.first, it.second.first, it.second.second);
@@ -815,6 +848,10 @@ bool QuantizationDriver::PropagateParams() {
       changed |= SetOperandParams(op, it.first, params);
     }
   }
+
+  LLVM_DEBUG(llvm::dbgs() << "\n\n\n");
+  LLVM_DEBUG(DumpStates(nullptr));
+
   return changed;
 }
 
@@ -863,10 +900,12 @@ void QuantizationDriver::Run() {
   }
 }
 
-void ApplyQuantizationParamsPropagation(
-    mlir::FuncOp func, bool is_signed, bool disable_per_channel,
-    OpQuantSpecGetter op_quant_spec_getter) {
-  QuantizationDriver(func, is_signed, disable_per_channel, op_quant_spec_getter)
+void ApplyQuantizationParamsPropagation(mlir::FuncOp func, bool is_signed,
+                                        bool disable_per_channel,
+                                        OpQuantSpecGetter op_quant_spec_getter,
+                                        bool post_training_quantization) {
+  QuantizationDriver(func, is_signed, disable_per_channel, op_quant_spec_getter,
+                     post_training_quantization)
       .Run();
 }
 

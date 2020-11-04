@@ -284,28 +284,28 @@ class DenseTest(test.TestCase, parameterized.TestCase):
       weights = _get_variable_dict_from_varstore()
       self.assertEqual(len(weights), 2)
       # Check that the matrix weights got initialized to ones (from scope).
-      self.assertAllClose(weights['scope/dense/kernel'].read_value().eval(),
+      self.assertAllClose(weights['scope/dense/kernel'].read_value(),
                           np.ones((3, 2)))
       # Check that the bias still got initialized to zeros.
-      self.assertAllClose(weights['scope/dense/bias'].read_value().eval(),
-                          np.zeros((2)))
+      self.assertAllClose(weights['scope/dense/bias'].read_value(), np.zeros(
+          (2)))
 
+  @combinations.generate(combinations.combine(mode=['eager']))
   def testEagerExecution(self):
-    with context.eager_mode():
-      container = variable_scope.EagerVariableStore()
-      x = constant_op.constant([[2.0]])
-      with container.as_default():
-        y = core_layers.dense(
-            x, 1, name='my_dense',
-            kernel_initializer=init_ops.ones_initializer())
-      self.assertAllEqual(y, [[2.0]])
-      self.assertEqual(len(container.variables()), 2)
-      # Recreate the layer to test reuse.
-      with container.as_default():
-        core_layers.dense(
-            x, 1, name='my_dense',
-            kernel_initializer=init_ops.ones_initializer())
-      self.assertEqual(len(container.variables()), 2)
+    container = variable_scope.EagerVariableStore()
+    x = constant_op.constant([[2.0]])
+    with container.as_default():
+      y = core_layers.dense(
+          x, 1, name='my_dense',
+          kernel_initializer=init_ops.ones_initializer())
+    self.assertAllEqual(y, [[2.0]])
+    self.assertEqual(len(container.variables()), 2)
+    # Recreate the layer to test reuse.
+    with container.as_default():
+      core_layers.dense(
+          x, 1, name='my_dense',
+          kernel_initializer=init_ops.ones_initializer())
+    self.assertEqual(len(container.variables()), 2)
 
   def testFunctionalDenseWithCustomGetter(self):
     called = [0]

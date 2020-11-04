@@ -13,60 +13,39 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-// This is the operation definition file for LXLA.
+// This is the operation definition file for LMHLO, the "late" MHLO variant of
+// the dialect, which operates on buffers instead of tensors.
 //
-// This file largely overlaps with hlo_ops.td at a logic level. It's tempting to
-// merge these two files together, but we need to consider the following
+// This file largely overlaps with hlo_ops.td at a logical level. It's tempting
+// to merge these two files together, but we need to consider the following
 // obstacles:
 // * We need to have a common representation for arguments. That is to say,
-// HLO_Array<X> translates to HLO_Tensor<X> in HLO dialect, and
-// Arg<LHLO_Buffer<X>, "", [Mem(Read|Write)]> in LHLO. Array types within tuples
-// also need to be transformed.
+//   HLO_Array<X> translates to HLO_Tensor<X> in HLO dialect, and
+//   Arg<LHLO_Buffer<X>, "", [Mem(Read|Write)]> in LHLO. Array types within
+//   tuples also need to be transformed.
 // * As of now, TableGen's dag functions are not sufficient to accomplish the
-// one above.
-// * Traits aren't identical, but need to be coped. For example,
-// SameOperandAndResultType in HLO corresponds to SameTypeOperands in LHLO.
+//   one above.
+// * Traits aren't identical, but need to be copied. For example,
+//   SameOperandAndResultType in HLO corresponds to SameTypeOperands in LHLO.
 // * Also, currently HLO describes the API in XLA's client side, not service
-// side. LHLO aims for the service side.
+//   side. LHLO aims for the service side.
 
 #ifndef LHLO_OPS
 #define LHLO_OPS
 
 include "mlir/IR/OpBase.td"
+include "mlir/Interfaces/CopyOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 include "mlir/Interfaces/ViewLikeInterface.td"
-include "mlir-hlo/Dialect/mhlo/IR/hlo_ops_base.td"
+include "mlir-hlo/Dialect/mhlo/IR/lhlo_ops_base.td"
 
 def LHLO_Dialect : Dialect {
-  let name = "xla_lhlo";
-  let cppNamespace = "xla_lhlo";
+  let name = "lmhlo";
+  let cppNamespace = "::mlir::lmhlo";
 }
 
 //===----------------------------------------------------------------------===//
-// XLA type definitions.
-//===----------------------------------------------------------------------===//
-
-// Any integer tensor types
-def LHLO_IntBuffer : MemRefOf<[HLO_Int]>;
-
-// Any floating-point tensor types
-def LHLO_FpBuffer : MemRefOf<[AnyFloat]>;
-
-def LHLO_ComplexBuffer : MemRefOf<[AnyComplex]>;
-
-def LHLO_FpOrComplexBuffer : MemRefOf<[AnyFloat, AnyComplex]>;
-
-def LHLO_PredBuffer : MemRefOf<[HLO_Pred]>;
-
-// Any integer or floating-point tensor types
-def LHLO_IntOrFpBuffer : MemRefOf<[HLO_Int, AnyFloat]>;
-
-def LHLO_PredOrIntBuffer : MemRefOf<[HLO_Int, HLO_Pred]>;
-
-def LHLO_Buffer : MemRefOf<[AnyFloat, AnySignlessInteger, AnyComplex]>;
-
-//===----------------------------------------------------------------------===//
-// XLA nullary op definitions.
+// LMHLO nullary op definitions.
 //===----------------------------------------------------------------------===//
 
 class LHLO_Op<string mnemonic, list<OpTrait> traits> :
@@ -78,6 +57,8 @@ def LHLO_ConstOp : LHLO_Op<"constant", []>, BASE_HLO_ConstOp {
     ElementsAttr:$value,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output
   );
+
+  let hasCanonicalizer = 1;
 }
 
 def LHLO_IotaOp : LHLO_Op<"iota", []>, BASE_HLO_IotaOp {
@@ -86,7 +67,7 @@ def LHLO_IotaOp : LHLO_Op<"iota", []>, BASE_HLO_IotaOp {
 }
 
 //===----------------------------------------------------------------------===//
-// XLA unary elementwise op definitions.
+// LMHLO unary elementwise op definitions.
 //===----------------------------------------------------------------------===//
 // See https://www.tensorflow.org/xla/operation_semantics#element-wise_unary_functions
 
@@ -157,7 +138,7 @@ def LHLO_SinOp: LHLO_UnaryElementwiseOp<"sine", LHLO_FpOrComplexBuffer>, BASE_HL
 def LHLO_TanhOp: LHLO_UnaryElementwiseOp<"tanh", LHLO_FpOrComplexBuffer>, BASE_HLO_TanhOp;
 
 //===----------------------------------------------------------------------===//
-// XLA binary elementwise op definitions.
+// LMHLO binary elementwise op definitions.
 //===----------------------------------------------------------------------===//
 // See https://www.tensorflow.org/xla/operation_semantics#element-wise_binary_arithmetic_operations
 
@@ -212,7 +193,7 @@ def LHLO_SubOp : LHLO_BinaryElementwiseOp<"subtract">, BASE_HLO_SubOp;
 def LHLO_XorOp : LHLO_BinaryElementwiseOp<"xor", LHLO_PredOrIntBuffer>, BASE_HLO_XorOp;
 
 //===----------------------------------------------------------------------===//
-// XLA control flow op definitions.
+// LMHLO control flow op definitions.
 //===----------------------------------------------------------------------===//
 
 // TODO(b/139813999): specify required function signature in a type-safe way.
@@ -253,7 +234,7 @@ def LHLO_ReduceWindowOp: LHLO_Op<"reduce_window", [
 
 // TODO(timshen): Add a custom parser to hide operand_segment_sizes. For example,
 // A tuple-like pattern match syntax could work:
-// xla_lhlo.case %index, (%input0, %input1, %input2), (%output0, %output1) {
+// lmhlo.case %index, (%input0, %input1, %input2), (%output0, %output1) {
 //   ...
 // }, {
 //   ...
@@ -283,8 +264,18 @@ def LHLO_WhileOp: LHLO_Op<"while", [SameVariadicOperandSize]>,
   let regions = (region SizedRegion<1>:$cond, SizedRegion<1>:$body);
 }
 
+def LHLO_CustomCallOp : LHLO_Op<"custom_call", []>, BASE_HLO_CustomCallOp {
+  let arguments = (ins
+    Arg<Variadic<LHLO_Buffer>, "", [MemRead]>:$args,
+    Arg<LHLO_Buffer, "", [MemWrite]>:$output,
+    StrAttr:$call_target_name,
+    DefaultValuedAttr<BoolAttr, "false">:$has_side_effect,
+    DefaultValuedAttr<StrAttr, "">:$backend_config
+  );
+}
+
 //===----------------------------------------------------------------------===//
-// XLA tuple op definitions.
+// LMHLO tuple op definitions.
 //===----------------------------------------------------------------------===//
 
 def LHLO_CompareOp: LHLO_Op<"compare", []>, BASE_HLO_CompareOp {
@@ -293,12 +284,13 @@ def LHLO_CompareOp: LHLO_Op<"compare", []>, BASE_HLO_CompareOp {
     Arg<LHLO_Buffer, "", [MemRead]>:$rhs,
     Arg<LHLO_PredBuffer, "", [MemWrite]>:$out,
     OptionalAttr<BroadcastDimAttr>:$broadcast_dimensions,
-    HLO_ComparisonDirectionAttr:$comparison_direction
+    HLO_ComparisonDirectionAttr:$comparison_direction,
+    OptionalAttr<HLO_ComparisonTypeAttr>:$compare_type
   );
 }
 
 //===----------------------------------------------------------------------===//
-// XLA Slice definitions.
+// LMHLO Slice definitions.
 //===----------------------------------------------------------------------===//
 
 def LHLO_SliceOp: LHLO_Op<
@@ -329,15 +321,16 @@ def HLO_DynamicUpdateSliceOp: LHLO_Op<"dynamic-update-slice", []> {
 def HLO_StaticMemRefCastOp: Op<LHLO_Dialect, "static_memref_cast",
     [NoSideEffect, DeclareOpInterfaceMethods<ViewLikeOpInterface>]> {
   let summary = [{
-    "modifies the offset, sizes and strides of a statically shaped memref.
+    modifies the offset, sizes and strides of a statically shaped memref
   }];
   let description = [{
-    Allows to modify the offset, sizes and strides of a statically shaped memref.
+    Casts the statically shaped memref operand to a memref with optionally
+    modified offsets, sizes and strides.
 
     Example:
     ```mlir
     %buf_transformed =
-        xla_lhlo.static_memref_cast %buf
+        lmhlo.static_memref_cast %buf
         : memref<1x5xf32> -> memref<5xf32, offset: 2, strides: [1]>
 
     // The result of the op is a rank-1 memref with `[5]` shape, stride 1 and
@@ -348,12 +341,12 @@ def HLO_StaticMemRefCastOp: Op<LHLO_Dialect, "static_memref_cast",
   let arguments = (ins Arg<LHLO_Buffer, "", []>:$operand);
   let results = (outs Res<LHLO_Buffer, "", []>:$result);
 
-  let builders = [OpBuilder<
-    "OpBuilder &builder, OperationState &result, MemRefType resultType, " #
-    "Value operand", [{
-       result.addOperands(operand);
-       result.types.push_back(resultType);
-     }]>];
+  let builders = [
+    OpBuilderDAG<(ins "MemRefType":$resultType, "Value":$operand),
+    [{
+      $_state.addOperands(operand);
+      $_state.types.push_back(resultType);
+    }]>];
 
   let extraClassDeclaration = [{
     MemRefType getType() { return getResult().getType().cast<MemRefType>(); }
@@ -379,7 +372,7 @@ def HLO_DynamicMemRefCastOp: Op<LHLO_Dialect, "dynamic_memref_cast",
     Example:
     ```mlir
     %buf_transformed =
-        xla_lhlo.dynamic_memref_cast %buf(%size_X, %size_Y)[%step_X, %step_Y]
+        lmhlo.dynamic_memref_cast %buf(%size_X, %size_Y)[%step_X, %step_Y]
         : memref<?x?xf32> -> memref<?x?xf32, offset: 0, strides: [?, ?]>
     // The result of the op is a type-erased memref with `[%size_X, %size_Y]`
     // shape and `[%step_X, %step_Y]` strides. The offset will be inherited
@@ -394,13 +387,14 @@ def HLO_DynamicMemRefCastOp: Op<LHLO_Dialect, "dynamic_memref_cast",
   );
   let results = (outs Res<LHLO_Buffer, "", []>:$result);
 
-  let builders = [OpBuilder<
-    "OpBuilder &builder, OperationState &result, MemRefType resultType, " #
-    "Value operand, ValueRange sizes, ValueRange strides", [{
-       result.addOperands(operand);
-       result.addOperands(sizes);
-       result.addOperands(strides);
-       result.types.push_back(resultType);
+  let builders = [
+    OpBuilderDAG<(ins "MemRefType":$resultType, "Value":$operand,
+      "ValueRange":$sizes, "ValueRange":$strides),
+    [{
+      $_state.addOperands(operand);
+      $_state.addOperands(sizes);
+      $_state.addOperands(strides);
+      $_state.types.push_back(resultType);
      }]>];
 
   let extraClassDeclaration = [{
@@ -466,20 +460,13 @@ def ReshapeMemRefCastOp: Op<LHLO_Dialect, "reshape_memref_cast", [
 
   let arguments = (ins
     AnyRankedOrUnrankedMemRef:$operand,
-    MemRefRankOf<[AnySignlessInteger], [1]>:$shape
+    LHLO_ExtentBuffer:$shape
   );
   let results = (outs AnyRankedOrUnrankedMemRef:$result);
 
-  let builders = [OpBuilder<
-    "OpBuilder &builder, OperationState &result, MemRefType resultType, " #
-    "Value operand, Value shape", [{
-       result.addOperands(operand);
-       result.addOperands(shape);
-       result.types.push_back(resultType);
-     }]>];
-
   let extraClassDeclaration = [{
-    MemRefType getType() { return getResult().getType().cast<MemRefType>(); }
+    BaseMemRefType getType() {
+        return getResult().getType().cast<BaseMemRefType>(); }
   }];
 
   let verifier = [{ return Verify(*this); }];
@@ -491,7 +478,7 @@ def ReshapeMemRefCastOp: Op<LHLO_Dialect, "reshape_memref_cast", [
 
 
 //===----------------------------------------------------------------------===//
-// XLA Other op definitions.
+// LMHLO Other op definitions.
 //===----------------------------------------------------------------------===//
 
 def LHLO_BatchNormGradOp : LHLO_Op<"batch_norm_grad", []>,
@@ -583,53 +570,32 @@ def LHLO_ConcatenateOp : LHLO_Op<"concatenate", []>, BASE_HLO_ConcatenateOp {
    );
 }
 
-// TODO(bondhugula): Make this struct dialect independent so that it can be
-// shared between the HLO and LHLO dialects.
-def ConvDimensionNumbers : StructAttr<"ConvDimensionNumbers", LHLO_Dialect, [
-  StructFieldAttr<"input_batch_dimension",I64Attr>,
-  StructFieldAttr<"input_feature_dimension", I64Attr>,
-  StructFieldAttr<"input_spatial_dimensions", I64ElementsAttr>,
-  StructFieldAttr<"kernel_input_feature_dimension", I64Attr>,
-  StructFieldAttr<"kernel_output_feature_dimension", I64Attr>,
-  StructFieldAttr<"kernel_spatial_dimensions", I64ElementsAttr>,
-  StructFieldAttr<"output_batch_dimension", I64Attr>,
-  StructFieldAttr<"output_feature_dimension", I64Attr>,
-  StructFieldAttr<"output_spatial_dimensions", I64ElementsAttr>] > {
-
-  let description = "Structure of dimension information for conv op";
-}
-
 def LHLO_ConvOp : LHLO_Op<"convolution", []>, BASE_HLO_ConvOp {
-  let arguments = (ins
-    Arg<LHLO_Buffer, "", [MemRead]>:$lhs,
-    Arg<LHLO_Buffer, "", [MemRead]>:$rhs,
-    Arg<LHLO_Buffer, "", [MemWrite]>:$output,
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$window_strides,
-    // Default value: zero for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$padding,
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$lhs_dilation,
-    // Default value: one for each of the spatial dimension.
-    OptionalAttr<I64ElementsAttr>:$rhs_dilation,
-    ConvDimensionNumbers:$dimension_numbers,
-    I64Attr:$feature_group_count,
-    I64Attr:$batch_group_count,
-    HLO_PrecisionConfigAttr:$precision_config
-  );
+  let arguments = !con(
+    (ins
+       Arg<LHLO_Buffer, "", [MemRead]>:$lhs,
+       Arg<LHLO_Buffer, "", [MemRead]>:$rhs,
+       Arg<LHLO_Buffer, "", [MemWrite]>:$output),
+    ConvolutionAttributes<LHLO_Dialect>.attributes);
 }
 
-def LHLO_CopyOp: LHLO_Op<"copy", []>, BASE_HLO_CopyOp {
+def LHLO_CopyOp: LHLO_Op<"copy", [CopyOpInterface]>, BASE_HLO_CopyOp {
   let arguments = (ins
     Arg<LHLO_Buffer, "", [MemRead]>:$operand,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output
   );
+
+  let extraClassDeclaration = [{
+    Value getSource() { return operand();}
+    Value getTarget() { return output(); }
+  }];
 }
 
 def LHLO_DotOp: LHLO_Op<"dot", []>, BASE_HLO_DotOp {
   let arguments = (ins
     Arg<LHLO_Buffer, "", [MemRead]>:$lhs,
     Arg<LHLO_Buffer, "", [MemRead]>:$rhs,
+    DotDimensionNumbers:$dot_dimension_numbers,
     HLO_PrecisionConfigAttr:$precision_config,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output
   );
@@ -639,11 +605,8 @@ def LHLO_GatherOp: LHLO_Op<"gather", []>, BASE_HLO_GatherOp {
   let arguments = (ins
     Arg<LHLO_Buffer, "", [MemRead]>:$operand,
     Arg<LHLO_IntBuffer, "", [MemRead]>:$start_indices,
-    I64Attr:$index_vector_dim,
-    I64ElementsAttr:$offset_dims,
+    GatherDimensionNumbers:$dimension_numbers,
     I64ElementsAttr:$slice_sizes,
-    I64ElementsAttr:$collapsed_slice_dims,
-    I64ElementsAttr:$start_index_map,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output
   );
 }
@@ -661,7 +624,7 @@ def LHLO_ScatterOp: LHLO_Op<"scatter", []>, BASE_HLO_ScatterOp {
     Arg<LHLO_Buffer, "", [MemRead]>:$scatter_indices,
     Arg<LHLO_Buffer, "", [MemRead]>:$updates,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output,
-    ScatterDimensionNumbers<LHLO_Dialect>:$scatter_dimension_numbers,
+    ScatterDimensionNumbers:$scatter_dimension_numbers,
     DefaultValuedAttr<BoolAttr, "false">:$indices_are_sorted,
     DefaultValuedAttr<BoolAttr, "false">:$unique_indices
   );
@@ -737,7 +700,7 @@ def LHLO_AllReduceOp : LHLO_Op<"all_reduce", [SameTypeOperands]>,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output,
     I64ElementsAttr:$replica_groups,
     DefaultValuedAttr<BoolAttr, "false">:$constrain_layout,
-    OptionalAttr<ChannelHandle<LHLO_Dialect>>:$channel_id,
+    OptionalAttr<ChannelHandle>:$channel_id,
     DefaultValuedAttr<BoolAttr, "false">:$use_global_device_ids
   );
   let regions = (region SizedRegion<1>:$computation);
@@ -750,7 +713,7 @@ def LHLO_CollectivePermuteOp: LHLO_Op<"collective_permute", [SameTypeOperands]>,
     Arg<LHLO_Buffer, "", [MemRead]>:$operand,
     Arg<LHLO_Buffer, "", [MemWrite]>:$output,
     I64ElementsAttr:$source_target_pairs,
-    OptionalAttr<ChannelHandle<LHLO_Dialect>>:$channel_id
+    OptionalAttr<ChannelHandle>:$channel_id
   );
 }
 
@@ -852,9 +815,8 @@ def FusionOp : LHLO_Op<"fusion", [SingleBlockImplicitTerminator<"TerminatorOp">]
 
   let skipDefaultBuilders = 1;
   let builders = [
-     OpBuilder<"OpBuilder &builder, OperationState &result, "
-               "ArrayRef<NamedAttribute> attributes">
-   ];
+     OpBuilderDAG<(ins "ArrayRef<NamedAttribute>":$attributes)>
+  ];
 }
 
 def TerminatorOp :
@@ -863,10 +825,9 @@ def TerminatorOp :
   let description = [{
     Terminator operation for the LHLO dialect.
   }];
-  let builders = [OpBuilder<
-    "OpBuilder &b, OperationState &result, ValueRange operands",
-    [{ build(b, result, llvm::None, operands, llvm::None); }]
-  >];
+  let builders = [
+    OpBuilderDAG<(ins "ValueRange":$operands),
+    [{ build($_builder, $_state, llvm::None, operands, llvm::None); }]>];
 }
 
 #endif // LHLO_OPS

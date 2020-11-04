@@ -19,7 +19,6 @@ from __future__ import division
 from __future__ import print_function
 
 import copy
-import functools
 import threading
 
 from absl.testing import parameterized
@@ -51,7 +50,6 @@ from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gradients
-from tensorflow.python.ops import init_ops_v2
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import partitioned_variables
 from tensorflow.python.ops import resource_variable_ops
@@ -86,7 +84,7 @@ def create_test_objects(cluster_spec=None,
         task_type=task_type,
         task_id=task_id,
         num_accelerators={'GPU': num_gpus})
-    distribution = parameter_server_strategy.ParameterServerStrategy(
+    distribution = parameter_server_strategy.ParameterServerStrategyV1(
         cluster_resolver)
     target = 'grpc://' + cluster_spec[WORKER][task_id]
   else:
@@ -193,7 +191,7 @@ class ParameterServerStrategyTestBase(
           g = e + 1.0
         self.assertEqual(g.device, worker_device + '/device:CPU:1')
 
-        # Ths ops.colocate_with will be ignored when defining a variable but not
+        # This ops.colocate_with will be ignored when defining a variable but not
         # for a normal tensor.
         with ops.colocate_with(x):
           u = variable_scope.get_variable('u', initializer=30.0)
@@ -347,7 +345,7 @@ class ParameterServerStrategyTestBase(
           g = e + 1.0
         self.assertEqual(g.device, device_util.canonicalize('/device:CPU:1'))
 
-        # Ths ops.colocate_with will be ignored when defining a variable but not
+        # This ops.colocate_with will be ignored when defining a variable but not
         # for a normal tensor.
         with ops.colocate_with(x):
           u = variable_scope.get_variable('u', initializer=30.0)
@@ -452,10 +450,8 @@ class ParameterServerStrategyTestBase(
          self.cached_session(target=master_target,
                              config=sess_config) as sess, \
          d.scope():
-      initializer = functools.partial(
-          init_ops_v2.GlorotUniform(), (1, 1), dtype=dtypes.float32)
-      kernel = variables.Variable(
-          initial_value=initializer, name='kernel', trainable=True)
+      kernel = strategy_test_lib.create_variable_like_keras_layer(
+          'kernel', (1, 1), dtypes.float32,)
 
       def loss_fn(x):
         y = array_ops.reshape(
@@ -752,7 +748,7 @@ class ParameterServerStrategyTest(
         task_type='worker',
         task_id=1,
         num_accelerators={'GPU': 0})
-    strategy = parameter_server_strategy.ParameterServerStrategy(
+    strategy = parameter_server_strategy.ParameterServerStrategyV1(
         cluster_resolver)
     dataset = dataset_ops.DatasetV2.from_tensor_slices([5., 6., 7., 8.])
 
@@ -763,10 +759,9 @@ class ParameterServerStrategyTest(
                            strategy.experimental_distribute_dataset,
                            dataset.batch(2))
 
-    self.assertRaisesRegex(
-        NotImplementedError, 'ParameterServerStrategy*',
-        strategy.experimental_distribute_datasets_from_function,
-        lambda _: dataset)
+    self.assertRaisesRegex(NotImplementedError, 'ParameterServerStrategy*',
+                           strategy.distribute_datasets_from_function,
+                           lambda _: dataset)
 
     self.assertRaisesRegex(NotImplementedError, 'ParameterServerStrategy*',
                            strategy.scope)
